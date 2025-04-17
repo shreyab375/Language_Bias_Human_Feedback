@@ -10,7 +10,7 @@ if 'init' not in st.session_state:
     st.session_state.init = True
     st.session_state.scores_dict = {}
     st.session_state.current_page = 0  # Renamed to be more clear
-    st.session_state.saved_qs = set()
+    st.session_state.saved_pages = set()  # Track saved pages instead of questions
     st.session_state.all_scores = []
 
 # Load data function with error handling
@@ -92,6 +92,9 @@ st.write(f"Page {st.session_state.current_page + 1} of {total_pages}")
 # Create columns for responses
 cols = st.columns(responses_per_page)
 
+# Store current page indices for saving later
+current_page_indices = []
+
 # Display responses with the interval pattern
 displayed_responses = 0
 for col_idx in range(responses_per_page):
@@ -105,12 +108,15 @@ for col_idx in range(responses_per_page):
     if row_idx >= total_rows:
         break
     
+    # Add this index to our current page indices
+    current_page_indices.append(row_idx)
+    
     # Get the row data
     row = df.iloc[row_idx]
     question_id = row['question_id']
     model_name = row['llm']
-    resp_key = f"response_{question_id}_{model_name}"
-    score_key = f"score_{question_id}_{model_name}"
+    resp_key = f"response_{row_idx}_{question_id}_{model_name}"
+    score_key = f"score_{row_idx}_{question_id}_{model_name}"
     
     with cols[col_idx]:
         st.subheader(f"Response {row_idx + 1}")
@@ -134,13 +140,15 @@ for col_idx in range(responses_per_page):
         st.session_state[score_key] = score
         
         # Also store in our dictionary for saving later
-        if question_id not in st.session_state.scores_dict:
-            st.session_state.scores_dict[question_id] = {}
+        if row_idx not in st.session_state.scores_dict:
+            st.session_state.scores_dict[row_idx] = {}
             
-        st.session_state.scores_dict[question_id][model_name] = {
+        st.session_state.scores_dict[row_idx] = {
+            "row_index": row_idx,
             "question_id": question_id,
             "llm": model_name,
-            "score": score
+            "score": score,
+            "page": st.session_state.current_page
         }
         
         displayed_responses += 1
@@ -160,40 +168,43 @@ with col1:
             st.rerun()
 
 with col2:
+    # Check if this page has already been saved
+    current_page_already_saved = st.session_state.current_page in st.session_state.saved_pages
+    
+    save_button_label = "💾 Update Scores on Page" if current_page_already_saved else "💾 Save All Scores on Page"
+    
     if displayed_responses > 0:
-        if st.button("💾 Save All Scores on Page"):
+        if st.button(save_button_label):
             # Get scores for current page
             scores_to_save = []
-            for col_idx in range(responses_per_page):
-                row_idx = pattern_idx + (pattern_set * interval * responses_per_page) + (col_idx * interval)
-                
-                if row_idx >= total_rows:
-                    break
+            
+            for row_idx in current_page_indices:
+                if row_idx in st.session_state.scores_dict:
+                    data = st.session_state.scores_dict[row_idx]
                     
-                row = df.iloc[row_idx]
-                question_id = row['question_id']
-                model_name = row['llm']
-                
-                if question_id in st.session_state.scores_dict and model_name in st.session_state.scores_dict[question_id]:
-                    data = st.session_state.scores_dict[question_id][model_name]
-                    scores_to_save.append(data)
+                    # Check if this specific row index has already been saved
+                    row_already_saved = False
+                    for i, item in enumerate(st.session_state.all_scores):
+                        if "row_index" in item and item["row_index"] == row_idx:
+                            # Update the existing entry
+                            st.session_state.all_scores[i] = data
+                            row_already_saved = True
+                            break
                     
-                    # Add to all_scores list if not already saved
-                    if question_id not in st.session_state.saved_qs:
+                    # If not already saved, add it as new
+                    if not row_already_saved:
                         st.session_state.all_scores.append(data)
-                    # If already saved, update the existing entry
-                    else:
-                        # Find and update the existing entry
-                        for i, item in enumerate(st.session_state.all_scores):
-                            if item["question_id"] == question_id and item["llm"] == model_name:
-                                st.session_state.all_scores[i] = data
-                                break
                     
-                    # Mark as saved
-                    st.session_state.saved_qs.add(question_id)
+                    scores_to_save.append(data)
+            
+            # Mark this page as saved
+            st.session_state.saved_pages.add(st.session_state.current_page)
             
             if scores_to_save:
-                st.success(f"Saved {len(scores_to_save)} scores!")
+                if current_page_already_saved:
+                    st.success(f"Updated {len(scores_to_save)} scores!")
+                else:
+                    st.success(f"Saved {len(scores_to_save)} scores!")
             else:
                 st.error("No scores to save.")
 
@@ -205,14 +216,30 @@ with col3:
 
 # Save all button
 if st.button("💾 Save All Remaining Scores"):
-    # Collect all unsaved scores
+    # Collect all scores from all pages that haven't been explicitly saved
     newly_saved = 0
-    for qid in st.session_state.scores_dict:
-        if qid not in st.session_state.saved_qs:
-            for model, data in st.session_state.scores_dict[qid].items():
+    current_unsaved_pages = set(range(total_pages)) - st.session_state.saved_pages
+    
+    # Check all row indices in scores_dict
+    for row_idx, data in st.session_state.scores_dict.items():
+        # If the page this row belongs to hasn't been saved yet
+        if data["page"] in current_unsaved_pages:
+            # Check if this specific row has already been saved
+            row_already_saved = False
+            for i, item in enumerate(st.session_state.all_scores):
+                if "row_index" in item and item["row_index"] == row_idx:
+                    # Update the existing entry
+                    st.session_state.all_scores[i] = data
+                    row_already_saved = True
+                    break
+            
+            # If not already saved, add it as new
+            if not row_already_saved:
                 st.session_state.all_scores.append(data)
                 newly_saved += 1
-            st.session_state.saved_qs.add(qid)
+            
+            # Mark the page as saved
+            st.session_state.saved_pages.add(data["page"])
     
     if newly_saved > 0:
         st.success(f"Saved {newly_saved} scores!")
